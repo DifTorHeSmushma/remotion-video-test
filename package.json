@@ -1,0 +1,71 @@
+{
+  "name": "my-video",
+  "version": "1.0.0",
+  "description": "My Remotion video",
+  "repository": {},
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "@babel/parser": "^7.29.0",
+    "@remotion/animation-utils": "4.0.443",
+    "@remotion/captions": "4.0.443",
+    "@remotion/cli": "4.0.443",
+    "@remotion/elevenlabs": "4.0.443",
+    "@remotion/gif": "^4.0.443",
+    "@remotion/google-fonts": "4.0.443",
+    "@remotion/layout-utils": "4.0.443",
+    "@remotion/light-leaks": "4.0.443",
+    "@remotion/lottie": "^4.0.443",
+    "@remotion/media-utils": "^4.0.443",
+    "@remotion/motion-blur": "^4.0.443",
+    "@remotion/noise": "^4.0.443",
+    "@remotion/paths": "4.0.443",
+    "@remotion/player": "4.0.443",
+    "@remotion/preload": "^4.0.443",
+    "@remotion/rounded-text-box": "^4.0.443",
+    "@remotion/sfx": "4.0.443",
+    "@remotion/shapes": "^4.0.443",
+    "@remotion/starburst": "4.0.443",
+    "@remotion/studio": "4.0.443",
+    "@remotion/tailwind-v4": "4.0.443",
+    "@remotion/transitions": "4.0.443",
+    "@remotion/zod-types": "4.0.443",
+    "clean": "^4.0.2",
+    "culori": "^4.0.2",
+    "lucide-react": "^1.7.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "remotion": "4.0.443",
+    "remotion-bits": "^0.2.0",
+    "tailwindcss": "4.2.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@mermaid-js/mermaid-cli": "^11.4.2",
+    "@remotion/eslint-config-flat": "4.0.443",
+    "@types/react": "19.2.14",
+    "@types/web": "0.0.166",
+    "eslint": "9.19.0",
+    "playwright": "^1.59.1",
+    "prettier": "3.8.1",
+    "typescript": "5.9.3",
+    "vitest": "^4.0.18"
+  },
+  "scripts": {
+    "dev": "remotion studio",
+    "build": "remotion bundle",
+    "upgrade": "remotion upgrade",
+    "lint": "eslint src && tsc",
+    "postinstall": "node scripts/verify-patches.js",
+    "screencast": "node .claude/skills/browser-screencast/bin/replay.js",
+    "screencast:record": "node .claude/skills/browser-screencast/bin/record.js"
+  },
+  "pnpm": {
+    "patchedDependencies": {
+      "@remotion/studio@4.0.443": "patches/@remotion__studio@4.0.443.patch"
+    }
+  },
+  "sideEffects": [
+    "*.css"
+  ]
+}
