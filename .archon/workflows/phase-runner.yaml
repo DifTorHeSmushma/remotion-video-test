@@ -1,0 +1,211 @@
+name: phase-runner
+description: |
+  Generic context-isolation wrapper for phase/step-based projects. Executes a
+  single phase command in its own isolated subagent context so heavy
+  intermediate artifacts (web searches, research briefs, render logs, long
+  scripts, sync JSON, etc.) never reach the main orchestrator. Returns only
+  a short receipt-style summary.
+
+  Input:  "<phase-command-name> <target-name> [extra flags]"
+    e.g.  "phase0-research DockerSandboxes"
+    e.g.  "build-plan MyProject --verbose"
+
+  Phase command file lookup order (first match wins):
+    1. $PHASE_CMD_DIR/<phase>.md        (if env var set)
+    2. .archon/commands/phases/<phase>.md
+    3. .claude/commands/<phase>.md
+    4. .claude/commands/phases/<phase>.md
+    5. .claude/agents/phases/<phase>.md
+
+  Status tracking + active marker paths are parametric. Override via env:
+    STATUS_FILE_TEMPLATE  default: src/TARGET/phase-status.md
+    ACTIVE_MARKER         default: .claude/active-target.txt
+  (The literal token "TARGET" in STATUS_FILE_TEMPLATE is replaced with the
+  resolved target name.)
+
+provider: claude
+model: sonnet
+
+nodes:
+  # ─── Layer 0 ─────────────────────────────────────────────────────────────
+  # Parse + locate. No AI. Output is consumed by the command node via
+  # the workflow substitution mechanism.
+  # ────────────────────────────────────────────────────────────────────────
+
+  - id: parse-and-locate
+    bash: |
+      set -eu
+
+      raw="$ARGUMENTS"
+      # shellcheck disable=SC2206
+      parts=($raw)
+      phase="${parts[0]:-}"
+      target="${parts[1]:-}"
+      extra="${parts[*]:2}"
+
+      if [ -z "$phase" ] || [ -z "$target" ]; then
+        echo "FATAL: expected '<phase-command-name> <target-name> [extra flags]', got: $raw" >&2
+        exit 1
+      fi
+
+      # Parametric defaults
+      status_template="${STATUS_FILE_TEMPLATE:-src/TARGET/phase-status.md}"
+      active_marker="${ACTIVE_MARKER:-.claude/active-target.txt}"
+      status_file="${status_template//TARGET/$target}"
+
+      # Search for phase command spec. First match wins.
+      candidates=()
+      if [ -n "${PHASE_CMD_DIR:-}" ]; then
+        candidates+=("${PHASE_CMD_DIR%/}/${phase}.md")
+      fi
+      candidates+=(
+        ".archon/commands/phases/${phase}.md"
+        ".claude/commands/${phase}.md"
+        ".claude/commands/phases/${phase}.md"
+        ".claude/agents/phases/${phase}.md"
+      )
+
+      spec_path=""
+      for c in "${candidates[@]}"; do
+        if [ -f "$c" ]; then
+          spec_path="$c"
+          break
+        fi
+      done
+
+      if [ -z "$spec_path" ]; then
+        echo "FATAL: phase command file not found. Looked for:" >&2
+        for c in "${candidates[@]}"; do echo "  - $c" >&2; done
+        exit 1
+      fi
+
+      # Emit a compact key=value block the command node can rely on.
+      printf 'PHASE=%s\n'         "$phase"
+      printf 'TARGET=%s\n'        "$target"
+      printf 'EXTRA=%s\n'         "$extra"
+      printf 'SPEC_PATH=%s\n'     "$spec_path"
+      printf 'STATUS_FILE=%s\n'   "$status_file"
+      printf 'ACTIVE_MARKER=%s\n' "$active_marker"
+    timeout: 10000
+
+  # ─── Layer 1 ─────────────────────────────────────────────────────────────
+  # Execute the phase in a FRESH isolated session. Heavy tool output
+  # (WebSearch, WebFetch, Bash, large Writes) stays inside this node's
+  # context and is discarded when the node completes. Only the structured
+  # output defined below flows downstream.
+  # ────────────────────────────────────────────────────────────────────────
+
+  - id: execute-phase
+    command: phase-runner-execute
+    depends_on: [parse-and-locate]
+    context: fresh
+    idle_timeout: 900000
+    output_format:
+      type: object
+      properties:
+        phase:         { type: string }
+        target:        { type: string }
+        status:
+          type: string
+          enum: [done, failed, gate-blocked]
+        files_written:
+          type: array
+          items: { type: string }
+        gate_result:   { type: string }
+        next_action:   { type: string }
+        notes:         { type: string }
+      required: [phase, target, status, next_action]
+
+  # ─── Layer 2 ─────────────────────────────────────────────────────────────
+  # Best-effort tracking update. Runs regardless of execute-phase outcome
+  # so a failed/blocked phase still lands a row, but the active marker is
+  # only written on a clean `done` (stale markers are worse than missing).
+  # ────────────────────────────────────────────────────────────────────────
+
+  - id: update-tracking
+    bash: |
+      set -eu
+
+      # Re-parse the key=value block from parse-and-locate. Archon shell-
+      # quotes $nodeId.output substitutions, so a here-string is safe.
+      ctx=$parse-and-locate.output
+
+      phase=$(printf '%s\n' "$ctx" | awk -F= '/^PHASE=/{sub(/^PHASE=/,""); print; exit}')
+      target=$(printf '%s\n' "$ctx" | awk -F= '/^TARGET=/{sub(/^TARGET=/,""); print; exit}')
+      status_file=$(printf '%s\n' "$ctx" | awk -F= '/^STATUS_FILE=/{sub(/^STATUS_FILE=/,""); print; exit}')
+      active_marker=$(printf '%s\n' "$ctx" | awk -F= '/^ACTIVE_MARKER=/{sub(/^ACTIVE_MARKER=/,""); print; exit}')
+
+      status="$execute-phase.output.status"
+      today=$(date +%Y-%m-%d)
+
+      # Create status file if missing
+      if [ ! -f "$status_file" ]; then
+        mkdir -p "$(dirname "$status_file")"
+        {
+          printf '# Phase Status: %s\n\n' "$target"
+          printf '| Phase | Status | Completed |\n'
+          printf '|-------|--------|-----------|\n'
+        } > "$status_file"
+      fi
+
+      # Update or append the row for this phase.
+      if grep -qE "^\| ${phase} \|" "$status_file"; then
+        # Replace the matching row (POSIX-ish sed; works on Git Bash)
+        tmp="${status_file}.tmp"
+        awk -v ph="$phase" -v st="$status" -v dt="$today" '
+          BEGIN { FS=OFS="|" }
+          $0 ~ "^\\| " ph " \\|" { print "| " ph " | " st " | " dt " |"; next }
+          { print }
+        ' "$status_file" > "$tmp" && mv "$tmp" "$status_file"
+      else
+        printf '| %s | %s | %s |\n' "$phase" "$status" "$today" >> "$status_file"
+      fi
+
+      # Active marker — only on clean success.
+      if [ "$status" = "done" ]; then
+        mkdir -p "$(dirname "$active_marker")"
+        printf '%s\n' "$target" > "$active_marker"
+        marker_state="written: $active_marker"
+      else
+        marker_state="skipped (status=$status)"
+      fi
+
+      printf 'STATUS_FILE=%s\n'    "$status_file"
+      printf 'PHASE_ROW=%s|%s|%s\n' "$phase" "$status" "$today"
+      printf 'ACTIVE_MARKER=%s\n'  "$marker_state"
+    depends_on: [parse-and-locate, execute-phase]
+    trigger_rule: all_done
+    timeout: 15000
+
+  # ─── Layer 3 ─────────────────────────────────────────────────────────────
+  # Render the final short receipt. Never echoes research/script/render
+  # content — only the structured fields + tracking state.
+  # ────────────────────────────────────────────────────────────────────────
+
+  - id: summarize
+    prompt: |
+      Render the phase-runner receipt. Output must be under 200 words, plain
+      text (no code fences, no extra prose), and match this exact structure.
+      Omit any line whose value would be empty/blank except for "Files written".
+
+      Phase:   $execute-phase.output.phase
+      Target:  $execute-phase.output.target
+      Status:  $execute-phase.output.status
+      Files written:
+      $execute-phase.output.files_written
+      Gate result: $execute-phase.output.gate_result
+      Next action: $execute-phase.output.next_action
+      Notes: $execute-phase.output.notes
+
+      Tracking:
+      $update-tracking.output
+
+      Rules:
+      - Files written: render as "  - <path>" per entry. If the array is empty
+        (or the substitution produced "[]"), emit "  - (none)".
+      - Do NOT include any content from research, scripts, or logs.
+      - Do NOT add explanatory prose.
+    depends_on: [execute-phase, update-tracking]
+    trigger_rule: all_done
+    model: haiku
+    allowed_tools: []
