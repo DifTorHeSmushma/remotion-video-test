@@ -1,11 +1,11 @@
-# Archon repo-level config for phase-runner
+# Archon repo-level config
 # Inherits global defaults from ~/.archon/config.yaml.
 
 assistant: claude
 
 worktree:
-  # Copy .env into new worktrees so phase specs that need API keys
-  # (WebSearch, WebFetch, TTS, etc.) keep working inside isolation.
+  # Git-ignored files to copy into each worktree run. Phase specs call
+  # Python/Node scripts that need these secrets and local configs.
   copyFiles:
     - .env
     - .env.local
@@ -13,3 +13,7 @@ worktree:
 defaults:
   loadDefaultCommands: true
   loadDefaultWorkflows: true
+
+commands:
+  folder: .archon/commands
+  autoLoad: true
