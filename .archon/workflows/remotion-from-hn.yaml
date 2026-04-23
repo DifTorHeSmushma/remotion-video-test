@@ -1,14 +1,22 @@
 name: remotion-from-hn
 description: |
-  Generate a short Remotion video from today's top Hacker News front-page
-  article and add it to the repo's persistent Remotion library. Every run
-  drops a new composition under `src/<Slug>/` and audio under
-  `public/<media>/<Slug>/`, so Studio opened against the repo shows every
-  video ever generated, side by side.
+  Generate a short Remotion video from a source URL and add it to the repo's
+  persistent Remotion library. Every run drops a new composition under
+  `src/<Slug>/` and audio under `public/<media>/<Slug>/`, so Studio opened
+  against the repo shows every video ever generated, side by side.
 
-  The video is ABOUT THE ARTICLE'S IDEAS, not about HN itself. Scoring,
-  comments, and platform metadata are context for finding the article, not
-  subject matter for the video.
+  Three modes, selected via `$ARGUMENTS`:
+    "hn"                            — auto-pick today's top HN front-page story
+    "hn <url>" | "article <url>"    — treat the given URL as an article
+    "marketing <url>"               — treat the given URL as a product/brand
+                                      and build a pitch video
+
+  hn/article mode: video is ABOUT THE ARTICLE'S IDEAS. No references to HN
+  metadata (points, comments, platform) or to the source publication.
+
+  marketing mode: video PITCHES the product. Hook on the problem it solves,
+  scenes 2–4 showcase benefits, final scene is a CTA pointing at the URL or
+  domain. Enthusiastic but factual — no fabricated features or testimonials.
 
   Requires the `remotion-best-practices` skill
   (`npx skills add remotion-dev/skills --yes`). The `visual-diagrams` skill
@@ -32,8 +40,8 @@ description: |
   plan / narration / findings / manifests. `./videos/` is gitignored by
   default — flip that to track renders.
 
-  `$ARGUMENTS` is ignored — the workflow always picks the top front-page
-  story.
+  Empty `$ARGUMENTS` defaults to `hn` (auto-pick top story), matching the
+  previous behaviour.
 
 provider: claude
 model: sonnet
@@ -69,39 +77,98 @@ nodes:
       fi
     timeout: 15000
 
-  # ── Layer 1: Fetch article + bootstrap Remotion project (parallel) ─
+  # ── Layer 1: Fetch source + bootstrap Remotion project (parallel) ─
 
-  - id: fetch-article
-    bash: |
-      set -euo pipefail
-      mkdir -p "$ARTIFACTS_DIR"
-      OUT="$ARTIFACTS_DIR/article.json"
+  - id: fetch-source
+    prompt: |
+      Parse the workflow arguments, fetch the source material, and write
+      two artifacts the rest of the workflow consumes.
 
-      if ! command -v jq >/dev/null 2>&1; then
-        echo "FATAL: jq is required. Install with: brew install jq" >&2
-        exit 1
-      fi
+      ── Arguments ──────────────────────────────────────────────────────
 
-      RAW=$(curl -fsSL "https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=1")
+      Raw `$ARGUMENTS` passed by the user: "$ARGUMENTS"
 
-      echo "$RAW" | jq '.hits[0] | {
-        object_id: .objectID,
-        title: .title,
-        url: .url,
-        author: .author,
-        points: .points,
-        num_comments: .num_comments,
-        story_text: .story_text,
-        created_at: .created_at
-      }' > "$OUT"
+      Format: `<mode> [url]`
+        mode = `hn` | `article` | `marketing`  (default: `hn`)
+        url  = optional URL. Required for `marketing`. Optional for `hn`
+               (if omitted, auto-pick today's top HN front-page story).
+        `article` is a synonym for `hn` when a URL is explicitly given —
+        both yield an article-style explainer video.
 
-      TITLE=$(jq -r '.title' "$OUT")
-      URL=$(jq -r '.url // "(no url — Ask HN style)"' "$OUT")
-      echo "Picked: $TITLE"
-      echo "URL:    $URL"
-      echo "Wrote:  $OUT"
+      Parsing rules:
+      - Empty or whitespace-only ARGUMENTS → `mode=hn`, no URL.
+      - If the first whitespace-separated token is `hn` / `article` /
+        `marketing`, that is the mode. Otherwise treat the first token as
+        an error (print FATAL and exit).
+      - Second token, if present, is the URL. It MUST look like `http(s)://...`
+        Reject anything else with a FATAL message.
+      - `marketing` without a URL is a FATAL error.
+
+      ── Steps by mode ──────────────────────────────────────────────────
+
+      1. **hn (no URL)**: WebFetch
+         `https://hn.algolia.com/api/v1/search?tags=front_page&hitsPerPage=1`.
+         Extract the top hit's `title` and `url`. If it has a URL,
+         WebFetch that URL for the article body. If no URL (Ask HN post),
+         use `story_text` as the body. If both are absent, use the title
+         alone and note that explicitly at the top of `article-body.md`.
+         `source_type` = `hn_algolia`.
+
+      2. **hn (with URL) / article**: WebFetch the given URL. Extract the
+         article's title and readable body. Strip navigation, ads, cookie
+         banners, footer. `source_type` = `article_url`.
+
+      3. **marketing**: WebFetch the given URL. Extract a structured brief
+         suitable for a product pitch, not a wall of copy. The brief should
+         capture:
+         - Product / brand name (as best you can infer from the page)
+         - One-sentence positioning (what it is, who it's for)
+         - Value proposition — 1–3 sentences
+         - 3–8 key features or capabilities (if the page lists them)
+         - Primary CTA or action (e.g. "Install with npx ...", "Try it free",
+           "Book a demo"). If no explicit CTA, use the domain as the CTA.
+         - Tone / vibe of the site (technical / playful / enterprise / etc.)
+         `source_type` = `marketing_site`.
+
+      ── Artifacts to write ─────────────────────────────────────────────
+
+      1. `$ARTIFACTS_DIR/article.json` — exact schema:
+
+             {
+               "mode": "hn" | "article" | "marketing",
+               "title": "<string>",
+               "url": "<string or empty>",
+               "source_type": "hn_algolia" | "article_url" | "marketing_site"
+             }
+
+         Keep it exactly these four top-level fields. Downstream nodes
+         (music script, summarize, archive) read `title` and `url`.
+
+      2. `$ARTIFACTS_DIR/article-body.md` — plain text or markdown.
+         - For hn/article: the extracted article content, cleaned up.
+         - For marketing: the structured brief described above, with
+           clear section headers (Product, Positioning, Value, Features,
+           CTA, Tone).
+
+      Then emit your final message as a JSON object matching the output
+      schema (mode, title, url, source_type). Downstream nodes read this
+      via `$fetch-source.output.mode` etc.
+    output_format:
+      type: object
+      properties:
+        mode:
+          type: string
+          enum: [hn, article, marketing]
+        title:
+          type: string
+        url:
+          type: string
+        source_type:
+          type: string
+          enum: [hn_algolia, article_url, marketing_site]
+      required: [mode, title, url, source_type]
     depends_on: [check-skill]
-    timeout: 30000
+    idle_timeout: 300000
 
   - id: derive-slug
     bash: |
@@ -142,7 +209,7 @@ nodes:
       echo "composition_id=$COMP_ID"
       echo "fs_slug=$FS_SLUG"
       echo "archive_dirname=$DATE-$FS_SLUG"
-    depends_on: [fetch-article]
+    depends_on: [fetch-source]
     timeout: 10000
 
   - id: ensure-remotion-project
@@ -265,31 +332,27 @@ nodes:
 
   - id: plan-video
     prompt: |
-      You are planning a short Remotion video about a Hacker News article.
+      You are planning a short Remotion video. The source material and its
+      mode have already been fetched by the upstream `fetch-source` node.
 
       ── Source material ─────────────────────────────────────────────────
 
-      Article metadata (HN):
-      $fetch-article.output
+      Source metadata:
+      $fetch-source.output
 
-      Article body: **first, use WebFetch** to pull the article's readable
-      content from the URL in article.json (if a URL is present). Write the
-      extracted substance to `$ARTIFACTS_DIR/article-body.md` (plain text or
-      markdown, stripped of navigation/ads/footer). If the URL can't be
-      fetched (paywall, 404, SPA) or the article is an Ask HN post, fall
-      back to `story_text` from the HN JSON. If neither is available, use
-      the title alone and NOTE that explicitly at the top of article-body.md.
+      Source fields are authoritative:
+      - `mode` — `hn` | `article` | `marketing` (drives the planning rules below)
+      - `title` — subject / product name
+      - `url` — source URL
+      - `source_type` — provenance tag
+
+      Full body is already on disk at `$ARTIFACTS_DIR/article-body.md`. Read
+      it before planning. Do NOT re-fetch the URL — fetch-source did that.
 
       Slug + composition ID already derived upstream (use verbatim):
       $derive-slug.output
 
-      ── Content focus (non-negotiable) ──────────────────────────────────
-
-      This video is ABOUT THE ARTICLE'S IDEAS. It is NOT about Hacker News.
-      Do NOT reference: "this hit the front page", "X points", "Y comments",
-      "discussed on HN", the submitter's username, or HN as a platform.
-
-      ── Constraints ─────────────────────────────────────────────────────
+      ── Shared constraints (all modes) ──────────────────────────────────
 
       - **3–5 scenes**, total target 30–60 seconds silent / dictated by
         voice length if voice is enabled (builder uses calculateMetadata).
@@ -297,33 +360,66 @@ nodes:
       - Scene IDs are stable: `scene1`, `scene2`, ...
       - On-screen text supports narration — not a transcript.
       - Composition ID and fs slug come from `$derive-slug.output` verbatim.
+      - No factual claims you can't back from `article-body.md`.
 
-      ── Scene 1 is a HOOK ───────────────────────────────────────────────
+      ── Scene 1 is always a HOOK ────────────────────────────────────────
 
-      - First 1.5–3 seconds must earn the next 25. Curiosity gap, surprise,
-        pattern-interrupt, counter-intuitive claim, or a concrete high-stakes
-        fact from the article.
+      - First 1.5–3 seconds must earn the next 25.
       - DO NOT use "Welcome to...", "Today we'll talk about...",
-        "In this video...", a generic title card, or the article's dry title
-        as the whole opening.
+        "In this video..." or a generic title card as the whole opening.
       - On-screen text scene 1: a single punchy teaser (≤ 10 words).
       - Narration scene 1: start with the hook line. No preamble.
       - Visual: dynamic entrance motion, not a static fade-in.
 
-      ── Diagram decision ────────────────────────────────────────────────
+      ── Mode-specific rules ─────────────────────────────────────────────
+
+      ### mode = `hn` or `article`
+
+      The video is ABOUT THE IDEAS IN THE ARTICLE. Treat it as an explainer.
+
+      - Narration explains the concepts/findings of the article.
+      - Hook angle: curiosity gap, surprising stat, counter-intuitive claim,
+        or a concrete fact pulled from `article-body.md`.
+      - **Do NOT reference** Hacker News, points, comments, submitter, "this
+        hit the front page", "discussed online", or the source publication.
+        The viewer doesn't care where you found it.
+      - No CTA. End on a takeaway or an open question.
+      - Tone: neutral, factual, clear. Think editorial, not promotional.
+
+      ### mode = `marketing`
+
+      The video is a PITCH for the product/brand described in article-body.md.
+
+      - Narration frames the product as a solution. Lead with the problem.
+      - Hook angle: the PROBLEM the product solves (surprising frustration,
+        hidden cost, broken status quo), OR a crisp one-line of the
+        transformation the product delivers.
+      - Scenes 2–4: the strongest 2–3 benefits / capabilities from the
+        brief. One idea per scene. Show product name, logo if available.
+      - Final scene: CTA. Show the `url` or its domain (e.g. "archon.diy")
+        and one concrete action ("Try it", "Install", "Book a demo" —
+        pull from the brief's CTA field when possible). Keep ≤ 6 words.
+      - **Do NOT fabricate features.** Only claim what article-body.md
+        supports. No invented testimonials, star ratings, or usage stats.
+      - **Do NOT reference** where you sourced the page (no "as seen on
+        their homepage", no "according to their docs"). The product is
+        the subject.
+      - Tone: enthusiastic but factual. No "game-changer", "revolutionary",
+        "unbelievable". Specificity beats superlatives.
+
+      ── Diagram decision (all modes) ────────────────────────────────────
 
       Decide whether any scene benefits from a diagram component from the
       `visual-diagrams` skill. Err toward NO — only use diagrams when the
-      article is genuinely about structure (systems, pipelines, comparisons,
-      N-stage processes, connected components).
+      source genuinely is about structure (systems, pipelines, comparisons,
+      N-stage processes, connected components). For a marketing video, a
+      diagram is a great fit when the product's value IS its architecture.
 
       ── Artifacts to write (all four required) ──────────────────────────
 
-      1. `$ARTIFACTS_DIR/article-body.md` — extracted article content.
+      1. `$ARTIFACTS_DIR/video-plan.md` — structured plan (schema below).
 
-      2. `$ARTIFACTS_DIR/video-plan.md` — structured plan (see schema below).
-
-      3. `$ARTIFACTS_DIR/narration.json` — spoken script for TTS:
+      2. `$ARTIFACTS_DIR/narration.json` — spoken script for TTS:
 
              {
                "composition_id": "<same as slug.json>",
@@ -334,7 +430,7 @@ nodes:
                ]
              }
 
-      4. `$ARTIFACTS_DIR/diagram-flag.json`:
+      3. `$ARTIFACTS_DIR/diagram-flag.json`:
 
              {
                "uses_diagrams": true | false,
@@ -344,15 +440,20 @@ nodes:
                ]
              }
 
+      4. `article-body.md` is ALREADY on disk (fetch-source wrote it). Don't
+         overwrite unless you can meaningfully improve it.
+
       video-plan.md schema:
 
           # Video Plan
 
-          **Article:** <title>
+          **Mode:** hn | article | marketing
+          **Subject:** <title>
           **URL:** <url>
           **Composition ID:** <composition_id from slug.json>  (1920x1080 @ 30fps)
           **Silent target duration:** <N>s
           **Uses diagrams:** yes | no
+          **Final CTA:** (marketing only — one line)
 
           ## scene1 — HOOK — <short name> (nominal <start>s → <end>s)
           - **Beat:** <what the viewer learns>
@@ -364,7 +465,7 @@ nodes:
           ## scene2 — ...
 
       Then print one-line-per-scene summary to stdout.
-    depends_on: [fetch-article, ensure-remotion-project, derive-slug]
+    depends_on: [fetch-source, ensure-remotion-project, derive-slug]
     idle_timeout: 600000
 
   # ── Layer 3: Audio layers (parallel, all opt-in) ───────────────────
@@ -422,8 +523,9 @@ nodes:
       SFX:         `$ARTIFACTS_DIR/audio/sfx-manifest.json`      (may be absent)
       Brand:       `.archon/brand.yaml`                          (may be absent)
 
-      First, detect the mode flags:
+      First, detect all the flags (audio layers, diagram flag, source mode):
 
+          MODE=$(jq -r '.mode' "$ARTIFACTS_DIR/article.json")      # hn | article | marketing
           [ -f "$ARTIFACTS_DIR/audio/voice-manifest.json" ] && VOICED=true  || VOICED=false
           [ -f "$ARTIFACTS_DIR/audio/music-manifest.json" ] && MUSIC=true   || MUSIC=false
           [ -f "$ARTIFACTS_DIR/audio/sfx-manifest.json"   ] && SFX=true     || SFX=false
@@ -435,14 +537,37 @@ nodes:
          `import.meta.glob` in `src/Root.tsx` — verify the corresponding
          `src/<CompId>/index.ts` exports a valid default composition meta.
       3. **Plan alignment.** Scene IDs + nominal durations match the plan.
-      4. **Hook quality.** Scene 1's narration and on-screen text do NOT
-         mention Hacker News, points, comments, or read like a title card.
-      5. **Content focus.** No HN metadata references anywhere.
-      6. **Remotion best practices** (use `remotion-best-practices` skill).
-      7. **Repo hygiene.** The new composition is isolated under its own
+      4. **Hook quality.** Scene 1 is a real hook — does NOT open with
+         "Welcome" / "Today" / "In this video" and is NOT just the subject
+         title as a card. On-screen text ≤ 10 words.
+      5. **Remotion best practices** (use `remotion-best-practices` skill).
+      6. **Repo hygiene.** The new composition is isolated under its own
          `src/<CompId>/` dir. It did NOT edit any other composition's files,
          did NOT modify `src/Root.tsx`, and did NOT touch shared code in
          `src/shared/` unless it vendored new helpers (which is OK).
+
+      Mode-specific content checks:
+
+      When MODE is `hn` or `article`:
+      7a. **No source-platform references.** Nothing in narration or on-screen
+          text mentions Hacker News, points, comments, submitter, upvotes,
+          "as discussed online", or the source publication. HIGH-severity if
+          violated.
+      7b. **No CTA.** The video ends on a takeaway or open question, not a
+          "Visit X" / "Try Y" call-to-action.
+
+      When MODE is `marketing`:
+      7c. **No fabricated features.** Every product claim traces to
+          `$ARTIFACTS_DIR/article-body.md`. Invented capabilities,
+          testimonials, star ratings, or usage stats are HIGH-severity.
+      7d. **Final scene is a CTA.** The last scene shows the product's URL
+          or domain plus one concrete action. Missing CTA is MED-severity.
+      7e. **No hype language.** Flag "game-changer", "revolutionary",
+          "unbelievable", "insane", "mind-blowing" and similar empty
+          superlatives as LOW-severity.
+      7f. **No source-page references.** Don't say "as seen on their
+          homepage" / "according to their docs". The product is the subject,
+          not the page.
 
       Voiced-mode checks (when VOICED=true):
       8. Every scene in voice-manifest has a matching `<Audio>` with the
@@ -606,11 +731,12 @@ nodes:
       Emit a short receipt under 200 words, plain text, no code fences, no
       leading or trailing prose. Match this structure exactly:
 
-          Remotion HN video
-          Article:   <title from $fetch-article.output>
-          URL:       <url from $fetch-article.output>
+          Remotion video
+          Mode:      <$fetch-source.output.mode>
+          Subject:   <$fetch-source.output.title>
+          URL:       <$fetch-source.output.url>
           Comp ID:   <composition_id from $derive-slug.output>
-          Modes:     voiced=<$qa-review.output.modes.voiced> music=<..modes.music> sfx=<..modes.sfx> diagrams=<..modes.diagrams>
+          Audio:     voiced=<$qa-review.output.modes.voiced> music=<..modes.music> sfx=<..modes.sfx> diagrams=<..modes.diagrams>
           Verdict:   <$qa-review.output.verdict>
 
           Archive:   ./videos/<archive_dirname from $derive-slug.output>/
@@ -622,7 +748,7 @@ nodes:
           <one-paragraph: $qa-review.output.summary>
 
       Context substituted:
-      - Article JSON: $fetch-article.output
+      - Source:       $fetch-source.output
       - Slug JSON:    $derive-slug.output
       - QA modes:     $qa-review.output.modes
       - QA verdict:   $qa-review.output.verdict
