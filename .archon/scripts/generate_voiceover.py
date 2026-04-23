@@ -182,9 +182,11 @@ def main() -> None:
     if not scenes:
         sys.exit("FATAL: narration.json has no scenes[]")
 
-    # Per remotion-best-practices/rules/voiceover.md, audio lives under
-    # public/voiceover/<compositionId>/ so staticFile() resolves directly.
-    out_dir = artifacts_dir / "project" / "public" / "voiceover" / composition_id
+    # Audio lives under the repo's own public/voiceover/<compositionId>/ so
+    # staticFile() resolves directly. Archon runs this script with cwd =
+    # repo root (same place as .archon/), so Path.cwd() is the project root.
+    project_root = Path.cwd()
+    out_dir = project_root / "public" / "voiceover" / composition_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Voice: provider={provider}, composition={composition_id}, scenes={len(scenes)}")

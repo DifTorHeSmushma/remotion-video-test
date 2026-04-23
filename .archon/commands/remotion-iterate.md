@@ -12,6 +12,10 @@ You are the only node in the workflow allowed to edit scene code after the
 build step. Two skills loaded: `remotion-best-practices` and `visual-diagrams`
 (consult when relevant).
 
+The **repo root is the project root**. All edits happen inside
+`src/<composition_id>/` — do not touch `src/Root.tsx` (it auto-registers
+via `import.meta.glob`) and do not modify other compositions.
+
 ---
 
 ## Phase 1: LOAD
@@ -25,8 +29,8 @@ build step. Two skills loaded: `remotion-best-practices` and `visual-diagrams`
    - `$ARTIFACTS_DIR/audio/music-manifest.json`
    - `$ARTIFACTS_DIR/audio/sfx-manifest.json`
 6. `.archon/brand.yaml` (if present)
-7. `$ARTIFACTS_DIR/project/src/Root.tsx` + everything under
-   `$ARTIFACTS_DIR/project/src/<composition_id>/`
+7. Everything under `src/<composition_id>/` in the repo root. DO NOT read or
+   modify `src/Root.tsx` — it's stable and auto-registers.
 
 Then pull the relevant rule files based on what the findings flag —
 timing, sequencing, voiceover, calculate-metadata, audio for voice issues;
@@ -75,21 +79,23 @@ Common HIGH/CRITICAL issue shapes in this workflow:
 
 ## Phase 3: APPLY FIXES
 
-Edit the files in your plan. Rules:
+Edit the files in your plan, scoped strictly to `src/<composition_id>/`.
+Rules:
 
 - Do not change the `composition_id` (from `slug.json`).
 - Do not rename files unless a finding requires it.
 - Do not change fps/width/height.
+- Do not touch `src/Root.tsx` or any other composition's directory.
 - If a fix changes per-scene timing, keep `calculateMetadata` and
   `<Sequence>` offsets consistent.
-- If fixing audio wiring, keep manifest paths exact — they live under
-  `public/` and are read via `staticFile()` with the verbatim manifest path.
+- If fixing audio wiring, keep manifest paths exact — they live under the
+  repo's `public/` and are read via `staticFile()` with the verbatim
+  manifest path.
 - Keep edits minimal — one fix per finding, not a rewrite.
 
 ## Phase 4: VERIFY
 
 ```bash
-cd "$ARTIFACTS_DIR/project"
 npx --yes tsc --noEmit
 ```
 

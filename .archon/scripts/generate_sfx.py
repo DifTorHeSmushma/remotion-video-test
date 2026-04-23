@@ -115,7 +115,8 @@ def main() -> None:
     brand = read_brand_yaml(Path.cwd())
     style = (brand.get("sfx_style") or "").strip() if isinstance(brand, dict) else ""
 
-    out_dir = artifacts_dir / "project" / "public" / "sfx" / composition_id
+    project_root = Path.cwd()
+    out_dir = project_root / "public" / "sfx" / composition_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
     api_key = os.environ["ELEVENLABS_API_KEY"]
@@ -157,7 +158,7 @@ def main() -> None:
     results = []
     with httpx.Client(timeout=120.0) as client:
         for cue in anchors:
-            out_path = artifacts_dir / "project" / "public" / cue["path_rel"]
+            out_path = project_root / "public" / cue["path_rel"]
             print(f"  → {cue['id']}: {cue['prompt']}")
             synthesize_sfx(client, api_key, cue["prompt"], out_path, cue["duration_s"])
             actual = float(MP3(out_path).info.length)

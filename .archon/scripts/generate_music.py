@@ -164,7 +164,8 @@ def main() -> None:
             f"{resp.text[:500]}"
         )
 
-    out_dir = artifacts_dir / "project" / "public" / "music"
+    project_root = Path.cwd()
+    out_dir = project_root / "public" / "music"
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / f"{composition_id}.mp3"
     out_path.write_bytes(resp.content)

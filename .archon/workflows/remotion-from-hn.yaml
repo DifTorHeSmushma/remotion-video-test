@@ -1,32 +1,36 @@
 name: remotion-from-hn
 description: |
   Generate a short Remotion video from today's top Hacker News front-page
-  article. Bootstraps its own Remotion project into the workflow's artifacts
-  directory — the host repo does not need to be a Remotion project.
+  article and add it to the repo's persistent Remotion library. Every run
+  drops a new composition under `src/<Slug>/` and audio under
+  `public/<media>/<Slug>/`, so Studio opened against the repo shows every
+  video ever generated, side by side.
 
   The video is ABOUT THE ARTICLE'S IDEAS, not about HN itself. Scoring,
   comments, and platform metadata are context for finding the article, not
   subject matter for the video.
 
-  Requires the `remotion-best-practices` skill (`npx skills add remotion-dev/skills --yes`).
-  The `visual-diagrams` skill is used if the plan chooses a diagram-heavy
-  scene. If that skill is missing, the workflow still runs — the planner just
-  declines diagrams.
+  Requires the `remotion-best-practices` skill
+  (`npx skills add remotion-dev/skills --yes`). The `visual-diagrams` skill
+  is used if the plan chooses a diagram-heavy scene.
+
+  The Remotion project at the repo root is bootstrapped on the first run
+  (`ensure-remotion-project`). Subsequent runs detect it and skip scaffold.
+  You never scaffold manually — let the workflow do it.
 
   Audio is layered and every layer is OPT-IN via env:
-
     Voice (TTS):   VOICE_PROVIDER = cartesia | elevenlabs | none  (auto)
     Music (BGM):   MUSIC_PROVIDER = elevenlabs | none             (opt-in)
     SFX:           SFX_PROVIDER   = elevenlabs | none             (opt-in)
 
   Brand overlay is optional — drop a `.archon/brand.yaml` (see
-  `.archon/brand.example.yaml`) to control palette / font / logo / voice tone
-  / music mood. Missing file ⇒ neutral defaults.
+  `.archon/brand.example.yaml`) to control palette / font / logo / voice
+  tone / music mood. Missing file ⇒ neutral defaults.
 
   Archive: when `RENDER_ENABLED=true` (default), the final mp4 is rendered
-  and copied to `./videos/<YYYY-MM-DD>-<slug>/<slug>.mp4` so multiple runs
-  accumulate side-by-side rather than overriding each other. `./videos/` is
-  added to `.gitignore` — flip that to track renders.
+  and copied to `./videos/<YYYY-MM-DD>-<slug>/<slug>.mp4` alongside the
+  plan / narration / findings / manifests. `./videos/` is gitignored by
+  default — flip that to track renders.
 
   `$ARGUMENTS` is ignored — the workflow always picks the top front-page
   story.
@@ -57,7 +61,6 @@ nodes:
         exit 1
       fi
 
-      # Log visual-diagrams presence but do NOT fail — it's optional.
       if   [ -e ".claude/skills/visual-diagrams/SKILL.md" ] \
         || [ -e "$HOME/.claude/skills/visual-diagrams/SKILL.md" ]; then
         echo "visual-diagrams: installed"
@@ -66,7 +69,7 @@ nodes:
       fi
     timeout: 15000
 
-  # ── Layer 1: Fetch source + scaffold (parallel) ────────────────────
+  # ── Layer 1: Fetch article + bootstrap Remotion project (parallel) ─
 
   - id: fetch-article
     bash: |
@@ -106,7 +109,6 @@ nodes:
       TITLE=$(jq -r '.title' "$ARTIFACTS_DIR/article.json")
 
       # PascalCase slug for the composition ID (Remotion requires letters, digits, no dashes).
-      # Strategy: lowercase alnum words, uppercase first letter of each, concatenate, trim to 48.
       COMP_ID=$(printf '%s' "$TITLE" \
         | LC_ALL=C tr '[:upper:]' '[:lower:]' \
         | LC_ALL=C sed -E 's/[^a-z0-9]+/ /g' \
@@ -114,12 +116,10 @@ nodes:
         | LC_ALL=C tr -d ' ' \
         | cut -c1-48)
 
-      # Guarantee non-empty and that it starts with a letter (Remotion/TS identifier rules).
       if [ -z "$COMP_ID" ] || ! printf '%s' "$COMP_ID" | grep -qE '^[A-Za-z]'; then
         COMP_ID="HnStory$(date +%s)"
       fi
 
-      # kebab-case slug for filesystem paths.
       FS_SLUG=$(printf '%s' "$TITLE" \
         | LC_ALL=C tr '[:upper:]' '[:lower:]' \
         | LC_ALL=C sed -E 's/[^a-z0-9]+/-/g' \
@@ -145,20 +145,110 @@ nodes:
     depends_on: [fetch-article]
     timeout: 10000
 
-  - id: scaffold-project
+  - id: ensure-remotion-project
     bash: |
       set -euo pipefail
-      mkdir -p "$ARTIFACTS_DIR"
-      PROJ="$ARTIFACTS_DIR/project"
 
-      if [ -f "$PROJ/package.json" ]; then
-        echo "Remotion project already scaffolded at $PROJ (resumed run?)"
-      else
-        cd "$ARTIFACTS_DIR"
-        npx --yes create-video@latest --yes --blank --no-tailwind project
+      # Detect an existing Remotion project at the repo root.
+      HAS_REMOTION=false
+      if [ -f package.json ] && [ -f src/Root.tsx ]; then
+        if jq -e '.dependencies.remotion // .devDependencies.remotion' package.json > /dev/null 2>&1; then
+          HAS_REMOTION=true
+        fi
       fi
 
-      cd "$PROJ"
+      if [ "$HAS_REMOTION" = "true" ]; then
+        echo "Remotion project already present at $(pwd) — skipping scaffold."
+      else
+        echo "No Remotion project detected — scaffolding into repo root."
+
+        # Scaffold into a sibling temp dir then copy in (avoids create-video
+        # refusing to target a non-empty dir directly, and keeps .git / .archon
+        # / .claude / .agents / .gitignore intact).
+        TMP=$(mktemp -d)
+        trap 'rm -rf "$TMP"' EXIT
+        npx --yes create-video@latest --yes --blank --no-tailwind "$TMP/_project"
+
+        # Copy scaffold files into cwd (repo root). cp -R with dir/. semantics.
+        cp -R "$TMP/_project/." .
+
+        echo "Scaffolded files:"
+        ls -1 package.json remotion.config.ts tsconfig.json src/Root.tsx 2>/dev/null || true
+
+        # Overwrite Root.tsx with the auto-registering glob pattern so
+        # subsequent runs never need to edit Root.tsx (avoids race on
+        # composition registrations and keeps Root.tsx stable).
+        cat > src/Root.tsx <<'TSX'
+      // Auto-registering root — do not edit. Every composition that exposes
+      // a default export from `src/<Slug>/index.ts` is registered here.
+      import React from 'react';
+      import { Composition } from 'remotion';
+
+      type CompMeta = {
+        id: string;
+        component: React.ComponentType<any>;
+        width: number;
+        height: number;
+        fps: number;
+        durationInFrames: number;
+        defaultProps?: Record<string, unknown>;
+        calculateMetadata?: any;
+      };
+
+      // Vite/Remotion's import.meta.glob picks up every composition's index.ts
+      // eagerly so they're all bundled at Studio/render time.
+      const modules = import.meta.glob<{ default: CompMeta }>(
+        './*/index.ts',
+        { eager: true },
+      );
+
+      const entries: CompMeta[] = Object.values(modules)
+        .map((m) => m?.default)
+        .filter((m): m is CompMeta => !!m && typeof m === 'object' && typeof m.id === 'string');
+
+      export const RemotionRoot: React.FC = () => (
+        <>
+          {entries.map((e) => (
+            <Composition
+              key={e.id}
+              id={e.id}
+              component={e.component}
+              width={e.width}
+              height={e.height}
+              fps={e.fps}
+              durationInFrames={e.durationInFrames}
+              defaultProps={e.defaultProps}
+              calculateMetadata={e.calculateMetadata}
+            />
+          ))}
+        </>
+      );
+      TSX
+
+        # If the scaffold's default composition is under src/HelloWorld/ (or
+        # similar) without an index.ts export, add one so it stays previewable
+        # alongside new runs.
+        for d in src/*/; do
+          name=$(basename "$d")
+          if [ ! -f "$d/index.ts" ] && [ -f "$d/Composition.tsx" ]; then
+            cat > "$d/index.ts" <<TSXEOF
+      import { MyComposition } from './Composition';
+
+      export default {
+        id: '${name}',
+        component: MyComposition,
+        width: 1280,
+        height: 720,
+        fps: 30,
+        durationInFrames: 60,
+      };
+      TSXEOF
+            echo "Wrote $d/index.ts (scaffold default)"
+          fi
+        done
+      fi
+
+      # Install deps (idempotent; pnpm content-addressed store keeps this fast).
       if command -v pnpm >/dev/null 2>&1; then
         pnpm install --prefer-offline
       elif command -v bun >/dev/null 2>&1; then
@@ -167,9 +257,9 @@ nodes:
         npm install --no-audit --no-fund
       fi
 
-      echo "PROJECT_DIR=$PROJ"
+      echo "PROJECT_ROOT=$(pwd)"
     depends_on: [check-skill]
-    timeout: 300000
+    timeout: 600000
 
   # ── Layer 2: Plan (content-focused, hook-first, diagram-aware) ─────
 
@@ -186,21 +276,18 @@ nodes:
       content from the URL in article.json (if a URL is present). Write the
       extracted substance to `$ARTIFACTS_DIR/article-body.md` (plain text or
       markdown, stripped of navigation/ads/footer). If the URL can't be
-      fetched (paywall, 404, SPA) or the article is an Ask HN post, fall back
-      to `story_text` from the HN JSON. If neither is available, use the
-      title alone and NOTE that explicitly at the top of article-body.md.
+      fetched (paywall, 404, SPA) or the article is an Ask HN post, fall
+      back to `story_text` from the HN JSON. If neither is available, use
+      the title alone and NOTE that explicitly at the top of article-body.md.
 
-      Slug + composition ID already derived upstream (use these verbatim —
-      do not invent new ones):
+      Slug + composition ID already derived upstream (use verbatim):
       $derive-slug.output
 
       ── Content focus (non-negotiable) ──────────────────────────────────
 
       This video is ABOUT THE ARTICLE'S IDEAS. It is NOT about Hacker News.
       Do NOT reference: "this hit the front page", "X points", "Y comments",
-      "discussed on HN", the submitter's username, or HN as a platform. The
-      viewer doesn't know — and doesn't care — where you found the article.
-      Treat HN metadata as source-tracking only.
+      "discussed on HN", the submitter's username, or HN as a platform.
 
       ── Constraints ─────────────────────────────────────────────────────
 
@@ -208,74 +295,33 @@ nodes:
         voice length if voice is enabled (builder uses calculateMetadata).
       - 30fps, 1920×1080.
       - Scene IDs are stable: `scene1`, `scene2`, ...
-      - On-screen text supports narration — it is NOT a transcript. Headlines,
-        keywords, numerical callouts.
-      - No voiceover-hardcoded claims you can't back from the article body.
+      - On-screen text supports narration — not a transcript.
       - Composition ID and fs slug come from `$derive-slug.output` verbatim.
 
       ── Scene 1 is a HOOK ───────────────────────────────────────────────
 
-      Open with retention in mind:
       - First 1.5–3 seconds must earn the next 25. Curiosity gap, surprise,
         pattern-interrupt, counter-intuitive claim, or a concrete high-stakes
         fact from the article.
       - DO NOT use "Welcome to...", "Today we'll talk about...",
         "In this video...", a generic title card, or the article's dry title
         as the whole opening.
-      - On-screen text scene 1: a single punchy teaser (≤ 10 words), not the
-        article title, not a subtitle of the narration.
+      - On-screen text scene 1: a single punchy teaser (≤ 10 words).
       - Narration scene 1: start with the hook line. No preamble.
-      - Visual: dynamic motion — entrance/build-on animation, not a static
-        headline fading in.
+      - Visual: dynamic entrance motion, not a static fade-in.
 
       ── Diagram decision ────────────────────────────────────────────────
 
       Decide whether any scene benefits from a diagram component from the
-      `visual-diagrams` skill (flow, hub-and-spoke, layered, comparison,
-      infographic). Heuristics:
-        - YES when the article describes a system, pipeline, architecture,
-          before/after comparison, N-stage process, or connected components.
-        - NO when it's a manifesto, opinion, narrative, list of ideas, bug
-          report, or something that reads as a single argument.
-      Err toward NO — only use diagrams when the article is genuinely about
-      structure.
+      `visual-diagrams` skill. Err toward NO — only use diagrams when the
+      article is genuinely about structure (systems, pipelines, comparisons,
+      N-stage processes, connected components).
 
-      If diagrams are used, specify which scenes and which diagram type per
-      scene. Those scenes will use `InfographicFlow` / `HubAndSpoke` /
-      `FlowDiagram` / `LayeredArchitecture` / `ComparisonDiagram` from the
-      skill rather than plain typography.
+      ── Artifacts to write (all four required) ──────────────────────────
 
-      ── Artifacts to write (all three required) ─────────────────────────
+      1. `$ARTIFACTS_DIR/article-body.md` — extracted article content.
 
-      1. `$ARTIFACTS_DIR/article-body.md` — extracted article content (see
-         "Source material" above).
-
-      2. `$ARTIFACTS_DIR/video-plan.md` — structured plan:
-
-             # Video Plan
-
-             **Article:** <title>
-             **URL:** <url>
-             **Composition ID:** <composition_id from slug.json>  (1920x1080 @ 30fps)
-             **Silent target duration:** <N>s
-             **Uses diagrams:** yes | no
-             **Diagram scenes:** (only when yes — list scene IDs)
-
-             ## scene1 — HOOK — <short name> (nominal <start>s → <end>s)
-             - **Beat:** <what the viewer learns>
-             - **On-screen text:** "<≤10-word teaser>"
-             - **Visuals:** <dynamic entrance motion>
-             - **Diagram:** none | flow | hub-and-spoke | layered | comparison | infographic
-             - **Transition out:** cut | fade | slide | wipe
-
-             ## scene2 — <short name> (nominal <start>s → <end>s)
-             - **Beat:** ...
-             - **On-screen text:** ...
-             - **Visuals:** ...
-             - **Diagram:** ...
-             - **Transition out:** ...
-
-             ## ... (up to scene5)
+      2. `$ARTIFACTS_DIR/video-plan.md` — structured plan (see schema below).
 
       3. `$ARTIFACTS_DIR/narration.json` — spoken script for TTS:
 
@@ -284,15 +330,11 @@ nodes:
                "fps": 30,
                "scenes": [
                  { "id": "scene1", "text": "<hook line, 12–25 words>" },
-                 { "id": "scene2", "text": "..." },
-                 ...
+                 { "id": "scene2", "text": "..." }
                ]
              }
 
-         Plain prose only — no markdown, no pronunciation tags, no "Scene 1:"
-         preambles. Each `text` is exactly what will be spoken.
-
-      4. `$ARTIFACTS_DIR/diagram-flag.json` — machine-readable diagram plan:
+      4. `$ARTIFACTS_DIR/diagram-flag.json`:
 
              {
                "uses_diagrams": true | false,
@@ -302,14 +344,32 @@ nodes:
                ]
              }
 
-         `scenes` is empty when `uses_diagrams: false`.
+      video-plan.md schema:
 
-      After writing all four files, print a one-line-per-scene summary to
-      stdout. Downstream nodes read the files from disk.
-    depends_on: [fetch-article, scaffold-project, derive-slug]
+          # Video Plan
+
+          **Article:** <title>
+          **URL:** <url>
+          **Composition ID:** <composition_id from slug.json>  (1920x1080 @ 30fps)
+          **Silent target duration:** <N>s
+          **Uses diagrams:** yes | no
+
+          ## scene1 — HOOK — <short name> (nominal <start>s → <end>s)
+          - **Beat:** <what the viewer learns>
+          - **On-screen text:** "<≤10-word teaser>"
+          - **Visuals:** <dynamic entrance motion>
+          - **Diagram:** none | flow | hub-and-spoke | layered | comparison | infographic
+          - **Transition out:** cut | fade | slide | wipe
+
+          ## scene2 — ...
+
+      Then print one-line-per-scene summary to stdout.
+    depends_on: [fetch-article, ensure-remotion-project, derive-slug]
     idle_timeout: 600000
 
   # ── Layer 3: Audio layers (parallel, all opt-in) ───────────────────
+  # Scripts write MP3s to the repo's `public/<media>/<CompId>/` and write
+  # manifests to $ARTIFACTS_DIR/audio/ for downstream workflow consumption.
 
   - id: generate-audio
     bash: |
@@ -349,11 +409,11 @@ nodes:
   - id: qa-review
     prompt: |
       You are a Remotion code reviewer. **Review only — do NOT edit source
-      files under `$ARTIFACTS_DIR/project/src`.** You may Write review
+      files under `./src/<CompId>/` in the repo.** You may Write review
       artifacts to `$ARTIFACTS_DIR/qa-findings.md` and run Bash for compile
       checks. Treat the source tree as read-only.
 
-      Project:     `$ARTIFACTS_DIR/project`
+      Project root: repo root (cwd)
       Plan:        `$ARTIFACTS_DIR/video-plan.md`
       Slug:        `$ARTIFACTS_DIR/slug.json` — composition_id + fs_slug
       Diagram:     `$ARTIFACTS_DIR/diagram-flag.json`
@@ -370,48 +430,45 @@ nodes:
           USES_DIAGRAMS=$(jq -r '.uses_diagrams' "$ARTIFACTS_DIR/diagram-flag.json" 2>/dev/null || echo false)
 
       Base checks (always):
-      1. **Compiles.** `cd $ARTIFACTS_DIR/project && npx --yes tsc --noEmit`.
-      2. **Registered.** Composition ID from slug.json is exported from
-         `src/Root.tsx`. Do NOT flag leftover scaffold compositions (`MyComp`).
+      1. **Compiles.** `npx --yes tsc --noEmit` from repo root.
+      2. **Registered.** Composition ID from slug.json appears via
+         `import.meta.glob` in `src/Root.tsx` — verify the corresponding
+         `src/<CompId>/index.ts` exports a valid default composition meta.
       3. **Plan alignment.** Scene IDs + nominal durations match the plan.
       4. **Hook quality.** Scene 1's narration and on-screen text do NOT
          mention Hacker News, points, comments, or read like a title card.
-         On-screen text is a short teaser, not the article title.
-         Narration opens with a hook line (no "Welcome", "Today", etc).
-      5. **Content focus.** No references to HN metadata (points, comments,
-         platform, upvotes, front page, submitter) anywhere in the video.
+      5. **Content focus.** No HN metadata references anywhere.
       6. **Remotion best practices** (use `remotion-best-practices` skill).
+      7. **Repo hygiene.** The new composition is isolated under its own
+         `src/<CompId>/` dir. It did NOT edit any other composition's files,
+         did NOT modify `src/Root.tsx`, and did NOT touch shared code in
+         `src/shared/` unless it vendored new helpers (which is OK).
 
       Voiced-mode checks (when VOICED=true):
-      7. Every scene in voice-manifest has a matching `<Audio>` with the
+      8. Every scene in voice-manifest has a matching `<Audio>` with the
          correct `staticFile()` path.
-      8. Duration source of truth is `calculateMetadata` using
+      9. Duration source of truth is `calculateMetadata` using
          `getAudioDuration(staticFile(...))` per scene. Hardcoded frame
          constants are HIGH-severity.
-      9. No verbatim double-narration on screen.
+     10. No verbatim double-narration on screen.
 
       Music-mode checks (when MUSIC=true):
-     10. A single `<Audio>` reads `music-manifest.path` via `staticFile()`.
-     11. Music audio has `volume` set (defaults in manifest around 0.2).
-         Unducked music under narration is HIGH-severity.
-     12. Music audio is placed at composition level so it spans all scenes.
+     11. A single `<Audio>` reads `music-manifest.path` via `staticFile()`.
+     12. Music audio has `volume` set (manifest default ~0.2). Unducked
+         music under narration is HIGH-severity.
+     13. Music audio is placed at composition level so it spans all scenes.
 
       SFX-mode checks (when SFX=true):
-     13. Intro whoosh, outro stinger, and N-1 transition ticks from the SFX
-         manifest are each wired with a Sequence offset that matches the
-         anchor (`composition_start`, `composition_end`, `scene_boundary`).
-     14. No SFX is placed mid-scene unless the plan explicitly required it.
+     14. Intro whoosh, outro stinger, and N-1 transition ticks are each
+         wired with a Sequence offset matching the anchor.
+     15. No SFX mid-scene unless the plan explicitly required it.
 
       Diagram-mode checks (when USES_DIAGRAMS=true):
-     15. Each scene listed in diagram-flag.scenes uses the appropriate
-         component from `visual-diagrams` (InfographicFlow, HubAndSpoke,
-         FlowDiagram, LayeredArchitecture, ComparisonDiagram).
-     16. Node/connection styling follows visual-diagrams rules (gradient
-         fills, 2-layer shadows, ≥2.5px connection strokes, no Unicode emoji
-         as icons).
+     16. Each flagged scene uses the appropriate `visual-diagrams` component.
+     17. Node/connection styling follows visual-diagrams rules.
 
       Write findings to `$ARTIFACTS_DIR/qa-findings.md`, one section per
-      issue, each prefixed with `CRITICAL`, `HIGH`, `MED`, or `LOW`.
+      issue, prefixed `CRITICAL` | `HIGH` | `MED` | `LOW`.
 
       Verdict:
       - `pass`            — zero CRITICAL and zero HIGH issues
@@ -474,7 +531,6 @@ nodes:
     bash: |
       set -euo pipefail
       COMP_ID=$(jq -r '.composition_id' "$ARTIFACTS_DIR/slug.json")
-      cd "$ARTIFACTS_DIR/project"
 
       echo "=== tsc --noEmit ==="
       npx --yes tsc --noEmit
@@ -495,7 +551,6 @@ nodes:
     bash: |
       set -euo pipefail
 
-      # Opt-out: set RENDER_ENABLED=false to skip this node.
       RENDER="${RENDER_ENABLED:-true}"
       if [ "$RENDER" = "false" ] || [ "$RENDER" = "0" ]; then
         echo "RENDER_ENABLED=$RENDER — skipping render + archive."
@@ -506,17 +561,16 @@ nodes:
       COMP_ID=$(jq -r '.composition_id' "$ARTIFACTS_DIR/slug.json")
       ARCHIVE_DIRNAME=$(jq -r '.archive_dirname' "$ARTIFACTS_DIR/slug.json")
 
-      REPO_ROOT="$(pwd)"
-      DEST="$REPO_ROOT/videos/$ARCHIVE_DIRNAME"
+      DEST="videos/$ARCHIVE_DIRNAME"
       mkdir -p "$DEST"
+      mkdir -p out
 
-      cd "$ARTIFACTS_DIR/project"
       echo "=== remotion render $COMP_ID ==="
       npx --yes remotion render "$COMP_ID" "out/$SLUG.mp4"
 
       cp "out/$SLUG.mp4" "$DEST/$SLUG.mp4"
 
-      # Copy useful artifacts alongside the mp4 for posterity.
+      # Copy logic artifacts alongside the mp4 for posterity.
       for f in "$ARTIFACTS_DIR/video-plan.md" \
                "$ARTIFACTS_DIR/narration.json" \
                "$ARTIFACTS_DIR/qa-findings.md" \
@@ -528,8 +582,6 @@ nodes:
         [ -f "$f" ] && cp "$f" "$DEST/" || true
       done
 
-      # Append to the running index.
-      cd "$REPO_ROOT"
       INDEX="videos/index.md"
       if [ ! -f "$INDEX" ]; then
         printf '# Video archive\n\n| Date | Title | URL | Verdict | Folder |\n|---|---|---|---|---|\n' > "$INDEX"
@@ -538,7 +590,6 @@ nodes:
       URL=$(jq -r '.url // "(Ask HN)"' "$ARTIFACTS_DIR/article.json")
       DATE=$(jq -r '.date' "$ARTIFACTS_DIR/slug.json")
       VERDICT="$qa-review.output.verdict"
-      # Escape pipes in title to avoid breaking markdown table.
       TITLE_SAFE=$(printf '%s' "$TITLE" | sed 's/|/\\|/g')
       printf '| %s | %s | %s | %s | [%s](%s) |\n' \
         "$DATE" "$TITLE_SAFE" "$URL" "$VERDICT" \
@@ -563,14 +614,9 @@ nodes:
           Verdict:   <$qa-review.output.verdict>
 
           Archive:   ./videos/<archive_dirname from $derive-slug.output>/
-          Project:   $ARTIFACTS_DIR/project
-          Plan:      $ARTIFACTS_DIR/video-plan.md
-          Body:      $ARTIFACTS_DIR/article-body.md
-          Findings:  $ARTIFACTS_DIR/qa-findings.md
-
-          Preview:   cd $ARTIFACTS_DIR/project && npx remotion studio
-          Render (if disabled above):
-                     cd $ARTIFACTS_DIR/project && npx remotion render <comp-id>
+          Source:    ./src/<composition_id>/
+          Preview:   npx remotion studio
+          Render:    npx remotion render <composition_id>
 
           QA summary:
           <one-paragraph: $qa-review.output.summary>
