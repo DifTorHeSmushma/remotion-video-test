@@ -20,6 +20,10 @@ build/
 out/
 *.log
 
+# Workflow video archive — per-run mp4s + artifacts under ./videos/<date>-<slug>/.
+# Remove this line if you want to track renders in git.
+videos/
+
 # OS / editor
 .DS_Store
 Thumbs.db
