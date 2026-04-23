@@ -20,6 +20,10 @@ build/
 out/
 *.log
 
+# Python bytecode (from .archon/scripts/*.py)
+__pycache__/
+*.pyc
+
 # Workflow video archive — per-run mp4s + artifacts under ./videos/<date>-<slug>/.
 # Remove this line if you want to track renders in git.
 videos/
