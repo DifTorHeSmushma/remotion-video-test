@@ -45,6 +45,11 @@ from pathlib import Path
 import httpx
 from mutagen.mp3 import MP3
 
+# Force UTF-8 stdout/stderr so non-ASCII chars (e.g. "→") don't crash on Windows cp1252.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
+
 sys.path.insert(0, str(Path(__file__).parent))
 from _audio_common import load_project_env  # noqa: E402
 
